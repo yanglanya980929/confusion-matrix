@@ -1,0 +1,173 @@
+library(caret) 
+library(Hmisc) 
+library(dplyr)
+library(VIM)
+library(scorecard) 
+library(corrplot)  
+library(nnet)  
+
+df_DPQ = sasxport.get("DPQ_I(3).XPT")
+sprintf("DPQ数据集样本数为：%d 列数为: %d" ,dim(df_DPQ)[1],dim(df_DPQ)[2])
+head(df_DPQ)
+
+df_DEMO = sasxport.get("DEMO_I(1).XPT")
+sprintf("DEMO数据集样本数为：%d 列数为: %d" ,dim(df_DEMO)[1],dim(df_DEMO)[2])
+head(df_DEMO)
+
+df_DR1IFF = sasxport.get("DR1IFF_I(2).XPT")
+sprintf("DR1IFF数据集样本数为：%d 列数为: %d" ,dim(df_DR1IFF)[1],dim(df_DR1IFF)[2])
+head(df_DR1IFF)
+df_DR1IFF<-df_DR1IFF[,-c(2:18)] 
+
+df_DR1IFF = sapply(df_DR1IFF,function(x) tapply(x,df_DR1IFF$seqn,function(x) mean(x,na.rm = T)))
+
+
+df_DR1TOT = sasxport.get("DR1TOT_I(2).XPT")
+sprintf("DR1TOT数据集样本数为：%d 列数为: %d" ,dim(df_DR1TOT)[1],dim(df_DR1TOT)[2])
+head(df_DR1TOT)
+
+
+df_DR2IFF = sasxport.get("DR2IFF_I(2).XPT")
+sprintf("DR2IFF数据集样本数为：%d 列数为: %d" ,dim(df_DR2IFF)[1],dim(df_DR2IFF)[2])
+head(df_DR2IFF)
+
+df_DR2IFF<-df_DR2IFF[,-c(2:18)]  
+
+df_DR2IFF = sapply(df_DR2IFF,function(x) tapply(x,df_DR2IFF$seqn,function(x) mean(x,na.rm = T)))
+
+
+
+df_DR2TOT = sasxport.get("DR2TOT_I(2).XPT")
+sprintf("DR2TOT数据集样本数为：%d 列数为: %d" ,dim(df_DR2TOT)[1],dim(df_DR2TOT)[2])
+head(df_DR2TOT)
+
+df_DRXFCD = sasxport.get("DRXFCD_I(2).XPT")
+sprintf("DRXFCD数据集样本数为：%d 列数为: %d" ,dim(df_DRXFCD)[1],dim(df_DRXFCD)[2])
+head(df_DRXFCD)
+
+duplicated(df_DPQ$seqn) %>% table() 
+
+df_DPQ[is.na(df_DPQ)] = 0
+df_DPQ$DPQ_finish = apply(df_DPQ[-1],1,function(x) any(x > 0)) %>% as.integer()
+table(df_DPQ$DPQ_finish) #查看0,1人数分布
+
+df_total = merge(df_DPQ[c("seqn","DPQ_finish")],df_DEMO,by.x = 'seqn',by.y = 'seqn',all.x = T)
+df_total = merge(df_total,df_DR1IFF,by.x = 'seqn',by.y = 'seqn',all.x = T)
+df_total = merge(df_total,df_DR2IFF,by.x = 'seqn',by.y = 'seqn',all.x = T)
+df_total = merge(df_total,df_DR1TOT,by.x = 'seqn',by.y = 'seqn',all.x = T)
+df_total = merge(df_total,df_DR2TOT,by.x = 'seqn',by.y = 'seqn',all.x = T)
+
+
+df_total = df_total[names(which(sapply(df_total,function(x) sum(is.na(x))/dim(df_total)[1]) <= 0.2))]
+aggr(df_total,prop=TRUE,numbers=TRUE)  
+dim(df_total)
+
+df_total = df_total[append("DPQ_finish",names(which(sapply(df_total[-1:-2],function(x) var(x,na.rm = T)) > 1)))]
+dim(df_total)
+
+for(i in colnames(df_total[-1])){
+  df_total[,i][is.na(df_total[,i])] = mean(df_total[,i],na.rm = T)
+  df_total[,i] = as.numeric(df_total[,i])
+}
+
+Var_cor = cor(df_total[-1])
+highCorr = findCorrelation(Var_cor,0.6)
+modeldata = df_total[-(highCorr + 1)]
+dim(modeldata)
+
+Var_comboinfo = findLinearCombos(modeldata[-1])  
+
+corrplot(corr = cor(modeldata[-1]))  
+
+#逻辑回归
+##拆分训练集和测试集
+modeldata$DPQ_finish = as.factor(modeldata$DPQ_finish)
+prop.table(table(modeldata$DPQ_finish))  #查看好坏样本比
+Index = createDataPartition(modeldata$DPQ_finish,p = 0.7,list = F)
+data_train = modeldata[Index,]
+data_test = modeldata[-Index,]
+#训练模型
+result = glm(DPQ_finish~.,data=data_train,family=binomial(link="logit"))
+summary(result)
+result_step = step(result)   #逐步回归
+summary(result)
+#预测模型
+test_predict_logit = predict(result,data_test,type = 'response') 
+#p大于0.5为1，小于0.5为0
+test_predict_logit_label = ifelse(test_predict_logit >= 0.5,1,0)
+#输出混淆矩阵confusion-matrix
+confusion_Table = table(data_test$DPQ_finish,test_predict_logit_label)
+confusionMatrix(confusion_Table)
+#验证集验证-输出precision、recall、F1
+y1_pred = sum(confusion_Table[1:2,1]) 
+y2_pred = sum(confusion_Table[1:2,2]) 
+y1_pred_good = confusion_Table[1]  
+y2_pred_good = confusion_Table[4] 
+y1_real = sum(confusion_Table[1,1:2]) 
+y2_real = sum(confusion_Table[2,1:2]) 
+
+precision_y1 = y1_pred_good/y1_pred 
+recall_y1 = y1_pred_good/y1_real
+F_y1 = 2*precision_y1*recall_y1/(precision_y1 + recall_y1) 
+cat("0样本精准率",'\t',round(precision_y1,3),'\n')
+cat("0样本召回率",'\t',round(recall_y1,3),'\n')
+cat("0样本-F1值",'\t',round(F_y1,3),'\n')
+
+precision_y2 = y2_pred_good/y2_pred 
+recall_y2 = y2_pred_good/y2_real
+F_y2 = 2*precision_y2*recall_y2/(precision_y2 + recall_y2) #1-F值
+cat("1样本精准率",'\t',round(precision_y2,3),'\n')
+cat("1样本召回率",'\t',round(recall_y2,3),'\n')
+cat("1样本-F1值",'\t',round(F_y2,3),'\n')
+
+#KS
+scorecard::perf_eva(data_test$DPQ_finish,test_predict_logit)
+
+
+##神经网络
+#标准化
+data_normalize = function(x) (x - min(x))/(max(x) - min(x))
+for(i in colnames(modeldata)[-1]) modeldata[,i] = sapply(modeldata[i],data_normalize)
+Index = createDataPartition(modeldata$DPQ_finish,p = 0.7,list = F)
+data_train = modeldata[Index,]
+data_test = modeldata[-Index,]
+
+#训练模型
+result_network = nnet(DPQ_finish~.,
+                      data = data_train,
+                      size = 3,
+                      decay = 0.1,
+                      maxit = 500)
+summary(result_network)
+#测试集预测
+test_predict_network = predict(result_network,newdata = data_test)
+test_predict_network_label = ifelse(test_predict_network >= 0.5,1,0)
+table(test_predict_network_label)
+
+confusion_Table = table(data_test$DPQ_finish,test_predict_network_label)
+confusionMatrix(confusion_Table)
+
+#验证集验证-输出precision、recall、F1
+y1_pred = sum(confusion_Table[1:2,1]) #预测结果为0
+y2_pred = sum(confusion_Table[1:2,2]) #预测结果为1
+y1_pred_good = confusion_Table[1]  #预测结果为y1为准确的
+y2_pred_good = confusion_Table[4]  #预测结果为y2为准确的
+y1_real = sum(confusion_Table[1,1:2]) #0真实个数
+y2_real = sum(confusion_Table[2,1:2]) #1真实个数
+
+precision_y1 = y1_pred_good/y1_pred #0精准率
+recall_y1 = y1_pred_good/y1_real #0召回率
+F_y1 = 2*precision_y1*recall_y1/(precision_y1 + recall_y1) #0-F值
+cat("0样本精准率",'\t',round(precision_y1,3),'\n')
+cat("0样本召回率",'\t',round(recall_y1,3),'\n')
+cat("0样本-F1值",'\t',round(F_y1,3),'\n')
+
+precision_y2 = y2_pred_good/y2_pred #1精准率
+recall_y2 = y2_pred_good/y2_real #1召回率
+F_y2 = 2*precision_y2*recall_y2/(precision_y2 + recall_y2) #1-F值
+cat("1样本精准率",'\t',round(precision_y2,3),'\n')
+cat("1样本召回率",'\t',round(recall_y2,3),'\n')
+cat("1样本-F1值",'\t',round(F_y2,3),'\n')
+
+#KS
+scorecard::perf_eva(data_test$DPQ_finish,test_predict_network[,1])
